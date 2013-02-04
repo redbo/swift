@@ -669,6 +669,11 @@ class ContainerBroker(DatabaseBroker):
                 deleted INTEGER DEFAULT 0
             );
 
+            CREATE VIRTUAL TABLE obj_index USING fts3(
+                content='',
+                ROWID INTEGER PRIMARY KEY
+             );
+
             CREATE INDEX ix_object_deleted_name ON object (deleted, name);
 
             CREATE TRIGGER object_insert AFTER INSERT ON object
@@ -690,6 +695,7 @@ class ContainerBroker(DatabaseBroker):
                 SET object_count = object_count - (1 - old.deleted),
                     bytes_used = bytes_used - old.size,
                     hash = chexor(hash, old.name, old.created_at);
+                DELETE FROM obj_index WHERE ROWID=old.ROWID;
             END;
         """)
 
@@ -808,14 +814,22 @@ class ContainerBroker(DatabaseBroker):
                 for entry in fp.read().split(':'):
                     if entry:
                         try:
-                            (name, timestamp, size, content_type, etag,
-                                deleted) = pickle.loads(entry.decode('base64'))
+                            try:
+                                (name, timestamp, size, content_type, etag,
+                                    deleted) = \
+                                    pickle.loads(entry.decode('base64'))
+                                sterms = None
+                            except Exception:
+                                (name, timestamp, size, content_type, etag,
+                                    deleted, sterms) = \
+                                    pickle.loads(entry.decode('base64'))
                             item_list.append({'name': name,
                                               'created_at': timestamp,
                                               'size': size,
                                               'content_type': content_type,
                                               'etag': etag,
-                                              'deleted': deleted})
+                                              'deleted': deleted,
+                                              'sterms': sterms})
                         except Exception:
                             self.logger.exception(
                                 _('Invalid pending entry %(file)s: %(entry)s'),
@@ -870,7 +884,8 @@ class ContainerBroker(DatabaseBroker):
         """
         self.put_object(name, timestamp, 0, 'application/deleted', 'noetag', 1)
 
-    def put_object(self, name, timestamp, size, content_type, etag, deleted=0):
+    def put_object(self, name, timestamp, size, content_type, etag, deleted=0,
+                   sterms=None):
         """
         Creates an object in the DB with its metadata.
 
@@ -884,7 +899,7 @@ class ContainerBroker(DatabaseBroker):
         """
         record = {'name': name, 'created_at': timestamp, 'size': size,
                   'content_type': content_type, 'etag': etag,
-                  'deleted': deleted}
+                  'deleted': deleted, 'sterms': sterms}
         if self.db_file == ':memory:':
             self.merge_items([record])
             return
@@ -906,8 +921,8 @@ class ContainerBroker(DatabaseBroker):
                     # delimiter
                     fp.write(':')
                     fp.write(pickle.dumps(
-                        (name, timestamp, size, content_type, etag, deleted),
-                        protocol=PICKLE_PROTOCOL).encode('base64'))
+                        (name, timestamp, size, content_type, etag, deleted,
+                         sterms), protocol=PICKLE_PROTOCOL).encode('base64'))
                     fp.flush()
 
     def is_deleted(self, timestamp=None):
@@ -1050,8 +1065,9 @@ class ContainerBroker(DatabaseBroker):
             ''', (put_timestamp, delete_timestamp, object_count, bytes_used))
             conn.commit()
 
+
     def list_objects_iter(self, limit, marker, end_marker, prefix, delimiter,
-                          path=None):
+                          path=None, q=None):
         """
         Get a list of objects sorted by name starting at marker onward, up
         to limit entries.  Entries will begin with the prefix and will not
@@ -1068,8 +1084,8 @@ class ContainerBroker(DatabaseBroker):
         :returns: list of tuples of (name, created_at, size, content_type,
                   etag)
         """
-        (marker, end_marker, prefix, delimiter, path) = utf8encode(
-            marker, end_marker, prefix, delimiter, path)
+        (marker, end_marker, prefix, delimiter, path, q) = utf8encode(
+            marker, end_marker, prefix, delimiter, path, q)
         try:
             self._commit_puts()
         except LockTimeout:
@@ -1087,7 +1103,11 @@ class ContainerBroker(DatabaseBroker):
             results = []
             while len(results) < limit:
                 query = '''SELECT name, created_at, size, content_type, etag
-                           FROM object WHERE'''
+                           FROM object '''
+                if q:
+                    query += '''INNER JOIN obj_index
+                                ON object.rowid = obj_index.rowid '''
+                query += 'WHERE'
                 query_args = []
                 if end_marker:
                     query += ' name < ? AND'
@@ -1098,6 +1118,9 @@ class ContainerBroker(DatabaseBroker):
                 elif prefix:
                     query += ' name >= ? AND'
                     query_args.append(prefix)
+                if q:
+                    query += ' obj_index.content MATCH ? AND'
+                    query_args.append(q)
                 if self.get_db_version(conn) < 1:
                     query += ' +deleted = 0'
                 else:
@@ -1143,7 +1166,7 @@ class ContainerBroker(DatabaseBroker):
         Merge items into the object table.
 
         :param item_list: list of dictionaries of {'name', 'created_at',
-                          'size', 'content_type', 'etag', 'deleted'}
+                          'size', 'content_type', 'etag', 'deleted', 'sterms'}
         :param source: if defined, update incoming_sync with the source
         """
         with self.get() as conn:
@@ -1166,6 +1189,10 @@ class ContainerBroker(DatabaseBroker):
                         VALUES (?, ?, ?, ?, ?, ?)
                     ''', ([rec['name'], rec['created_at'], rec['size'],
                           rec['content_type'], rec['etag'], rec['deleted']]))
+                    conn.execute('''
+                        REPLACE INTO obj_index (ROWID, content) VALUES
+                            (last_insert_rowid(), ?);
+                        ''', (rec['sterms'],))
                 if source:
                     max_rowid = max(max_rowid, rec['ROWID'])
             if source:

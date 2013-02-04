@@ -33,7 +33,7 @@ from eventlet import sleep, Timeout, tpool
 from swift.common.utils import mkdirs, normalize_timestamp, public, \
     storage_directory, hash_path, renamer, fallocate, fsync, \
     split_path, drop_buffer_cache, get_logger, write_pickle, \
-    config_true_value, validate_device_partition, timing_stats
+    config_true_value, validate_device_partition, timing_stats, index_escape
 from swift.common.bufferedhttp import http_connect
 from swift.common.constraints import check_object_creation, check_mount, \
     check_float, check_utf8
@@ -387,6 +387,19 @@ class DiskFile(object):
                 raise
         raise DiskFileNotExist('Data File does not exist.')
 
+    def get_sterms(self):
+        sterms = {
+            'content_type': self.metadata['Content-Type'],
+            'hash': self.metadata['ETag'],
+            'last_modified': self.metadata['X-Timestamp'],
+            'size': self.metadata['Content-Length'],
+        }
+        # TODO: figure out what to do with spaces in metadata
+        for key, value in self.metadata.iteritems():
+            if key.lower().startswith('x-object-meta-'):
+                sterms['meta_' + key.lower()[14:].replace('-', '_')] = value
+        return ' '.join(index_escape('%s:%s' % x) for x in sterms.iteritems())
+
 
 class ObjectController(object):
     """Implements the WSGI application for the Swift Object Server."""
@@ -704,7 +717,8 @@ class ObjectController(object):
                  'x-content-type': file.metadata['Content-Type'],
                  'x-timestamp': file.metadata['X-Timestamp'],
                  'x-etag': file.metadata['ETag'],
-                 'x-trans-id': request.headers.get('x-trans-id', '-')},
+                 'x-trans-id': request.headers.get('x-trans-id', '-'),
+                 'x-sterms': file.get_sterms()},
                 device)
         resp = HTTPCreated(request=request, etag=etag)
         return resp

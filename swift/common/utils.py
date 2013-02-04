@@ -40,6 +40,7 @@ import cPickle as pickle
 import glob
 from urlparse import urlparse as stdlib_urlparse, ParseResult
 import itertools
+import string
 
 import eventlet
 from eventlet import GreenPool, sleep, Timeout
@@ -1612,3 +1613,13 @@ class InputProxy(object):
             raise
         self.bytes_received += len(line)
         return line
+
+
+_index_escape_map = dict((chr(idx), '_%2x' % idx) for idx in xrange(256))
+_index_escape_map.update(zip(string.ascii_letters + string.digits,
+                         string.ascii_letters + string.digits))
+_index_escape_map.update((chr(idx), chr(idx)) for idx in xrange(127, 256))
+
+
+def index_escape(txt):
+    return ''.join(map(_index_escape_map.__getitem__, txt))

@@ -27,7 +27,8 @@ import swift.common.db
 from swift.common.db import ContainerBroker
 from swift.common.utils import get_logger, get_param, hash_path, public, \
     normalize_timestamp, storage_directory, validate_sync_to, \
-    config_true_value, validate_device_partition, json, timing_stats
+    config_true_value, validate_device_partition, json, timing_stats, \
+    index_escape
 from swift.common.constraints import CONTAINER_LISTING_LIMIT, \
     check_mount, check_float, check_utf8, FORMAT2CONTENT_TYPE
 from swift.common.bufferedhttp import http_connect
@@ -235,7 +236,8 @@ class ContainerController(object):
                 return HTTPNotFound()
             broker.put_object(obj, timestamp, int(req.headers['x-size']),
                               req.headers['x-content-type'],
-                              req.headers['x-etag'])
+                              req.headers['x-etag'],
+                              sterms=req.headers.get('x-sterms'))
             return HTTPCreated(request=req)
         else:   # put container
             if not os.path.exists(broker.db_file):
@@ -338,6 +340,7 @@ class ContainerController(object):
             path = get_param(req, 'path')
             prefix = get_param(req, 'prefix')
             delimiter = get_param(req, 'delimiter')
+            query = get_param(req, 'q')
             if delimiter and (len(delimiter) > 1 or ord(delimiter) > 254):
                 # delimiters can be made more flexible later
                 return HTTPPreconditionFailed(body='Bad delimiter')
@@ -362,8 +365,14 @@ class ContainerController(object):
             ['text/plain', 'application/json', 'application/xml', 'text/xml'])
         if not out_content_type:
             return HTTPNotAcceptable(request=req)
-        container_list = broker.list_objects_iter(limit, marker, end_marker,
-                                                  prefix, delimiter, path)
+        if query:
+            query = ' '.join(map(index_escape, query.split(' ')))
+            container_list = broker.list_objects_iter(
+                limit, marker, end_marker, prefix, delimiter, path, q=query)
+        else:
+            container_list = broker.list_objects_iter(limit, marker,
+                                                      end_marker, prefix,
+                                                      delimiter, path)
         if out_content_type == 'application/json':
             data = []
             for (name, created_at, size, content_type, etag) in container_list:

@@ -1589,6 +1589,23 @@ class TestFileComparison(Base):
             self.assert_status(412)
 
 
+class TestIndexQuery(Base):
+    env = TestContainerEnv
+    set_up = False
+    def testMetadataOnPut(self):
+        for i in range(10):
+            metadata = {}
+            metadata['meta%s' % i] = str(i)
+            file = self.env.container.file(Utils.create_name())
+            file.metadata = metadata
+            file.write_random(self.env.file_size)
+
+            file = self.env.container.file(file.name)
+            self.assert_(file.initialize())
+        files = self.env.container.files(parms={'q': 'meta_meta3:3'})
+        self.assertEquals(len(files), 1)
+
+
 class TestFileComparisonUTF8(Base2, TestFileComparison):
     set_up = False
 
