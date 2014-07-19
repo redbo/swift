@@ -38,7 +38,7 @@ import uuid
 import hashlib
 import logging
 import traceback
-from os.path import basename, dirname, exists, getmtime, join
+from os.path import basename, dirname, exists, join
 from random import shuffle
 from tempfile import mkstemp
 from contextlib import contextmanager
@@ -55,11 +55,14 @@ from swift.common.utils import mkdirs, Timestamp, \
     config_true_value, listdir, split_path, ismount, remove_file
 from swift.common.exceptions import DiskFileQuarantined, DiskFileNotExist, \
     DiskFileCollision, DiskFileNoSpace, DiskFileDeviceUnavailable, \
-    DiskFileDeleted, DiskFileError, DiskFileNotOpen, PathNotDir, \
-    ReplicationLockTimeout, DiskFileExpired
+    DiskFileDeleted, DiskFileError, DiskFileNotOpen, ReplicationLockTimeout, \
+    DiskFileExpired
 from swift.common.swob import multi_range_iterator
+from swift.obj import partitionindex
+
 from swift.common.storage_policy import get_policy_string, POLICIES
 from functools import partial
+
 
 PICKLE_PROTOCOL = 2
 ONE_WEEK = 604800
@@ -153,11 +156,11 @@ def quarantine_renamer(device_path, corrupted_file_path):
     :raises OSError: re-raises non errno.EEXIST / errno.ENOTEMPTY
                      exceptions from rename
     """
+    partitionindex.remove_file(corrupted_file_path)
     from_dir = dirname(corrupted_file_path)
     to_dir = join(device_path, 'quarantined',
                   get_data_dir(extract_policy_index(corrupted_file_path)),
                   basename(from_dir))
-    invalidate_hash(dirname(from_dir))
     try:
         renamer(from_dir, to_dir)
     except OSError as e:
@@ -230,6 +233,7 @@ def hash_cleanup_listdir(hsh_path, reclaim_age=ONE_WEEK):
             ts = files[0].rsplit('.', 1)[0]
             if (time.time() - float(Timestamp(ts))) > reclaim_age:
                 remove_file(join(hsh_path, files[0]))
+                partitionindex.remove_file(join(hsh_path, files[0]))
                 files.remove(files[0])
     elif files:
         files.sort(reverse=True)
@@ -241,138 +245,9 @@ def hash_cleanup_listdir(hsh_path, reclaim_age=ONE_WEEK):
                         and filename.endswith('.meta')
                         and filename < meta_file)):
                 remove_file(join(hsh_path, filename))
+                partitionindex.remove_file(join(hsh_path, filename))
                 files.remove(filename)
     return files
-
-
-def hash_suffix(path, reclaim_age):
-    """
-    Performs reclamation and returns an md5 of all (remaining) files.
-
-    :param reclaim_age: age in seconds at which to remove tombstones
-    :raises PathNotDir: if given path is not a valid directory
-    :raises OSError: for non-ENOTDIR errors
-    """
-    md5 = hashlib.md5()
-    try:
-        path_contents = sorted(os.listdir(path))
-    except OSError as err:
-        if err.errno in (errno.ENOTDIR, errno.ENOENT):
-            raise PathNotDir()
-        raise
-    for hsh in path_contents:
-        hsh_path = join(path, hsh)
-        try:
-            files = hash_cleanup_listdir(hsh_path, reclaim_age)
-        except OSError as err:
-            if err.errno == errno.ENOTDIR:
-                partition_path = dirname(path)
-                objects_path = dirname(partition_path)
-                device_path = dirname(objects_path)
-                quar_path = quarantine_renamer(device_path, hsh_path)
-                logging.exception(
-                    _('Quarantined %(hsh_path)s to %(quar_path)s because '
-                      'it is not a directory'), {'hsh_path': hsh_path,
-                                                 'quar_path': quar_path})
-                continue
-            raise
-        if not files:
-            try:
-                os.rmdir(hsh_path)
-            except OSError:
-                pass
-        for filename in files:
-            md5.update(filename)
-    try:
-        os.rmdir(path)
-    except OSError:
-        pass
-    return md5.hexdigest()
-
-
-def invalidate_hash(suffix_dir):
-    """
-    Invalidates the hash for a suffix_dir in the partition's hashes file.
-
-    :param suffix_dir: absolute path to suffix dir whose hash needs
-                       invalidating
-    """
-
-    suffix = basename(suffix_dir)
-    partition_dir = dirname(suffix_dir)
-    hashes_file = join(partition_dir, HASH_FILE)
-    with lock_path(partition_dir):
-        try:
-            with open(hashes_file, 'rb') as fp:
-                hashes = pickle.load(fp)
-            if suffix in hashes and not hashes[suffix]:
-                return
-        except Exception:
-            return
-        hashes[suffix] = None
-        write_pickle(hashes, hashes_file, partition_dir, PICKLE_PROTOCOL)
-
-
-def get_hashes(partition_dir, recalculate=None, do_listdir=False,
-               reclaim_age=ONE_WEEK):
-    """
-    Get a list of hashes for the suffix dir.  do_listdir causes it to mistrust
-    the hash cache for suffix existence at the (unexpectedly high) cost of a
-    listdir.  reclaim_age is just passed on to hash_suffix.
-
-    :param partition_dir: absolute path of partition to get hashes for
-    :param recalculate: list of suffixes which should be recalculated when got
-    :param do_listdir: force existence check for all hashes in the partition
-    :param reclaim_age: age at which to remove tombstones
-
-    :returns: tuple of (number of suffix dirs hashed, dictionary of hashes)
-    """
-
-    hashed = 0
-    hashes_file = join(partition_dir, HASH_FILE)
-    modified = False
-    force_rewrite = False
-    hashes = {}
-    mtime = -1
-
-    if recalculate is None:
-        recalculate = []
-
-    try:
-        with open(hashes_file, 'rb') as fp:
-            hashes = pickle.load(fp)
-        mtime = getmtime(hashes_file)
-    except Exception:
-        do_listdir = True
-        force_rewrite = True
-    if do_listdir:
-        for suff in os.listdir(partition_dir):
-            if len(suff) == 3:
-                hashes.setdefault(suff, None)
-        modified = True
-    hashes.update((hash_, None) for hash_ in recalculate)
-    for suffix, hash_ in hashes.items():
-        if not hash_:
-            suffix_dir = join(partition_dir, suffix)
-            try:
-                hashes[suffix] = hash_suffix(suffix_dir, reclaim_age)
-                hashed += 1
-            except PathNotDir:
-                del hashes[suffix]
-            except OSError:
-                logging.exception(_('Error hashing suffix'))
-            modified = True
-    if modified:
-        with lock_path(partition_dir):
-            if force_rewrite or not exists(hashes_file) or \
-                    getmtime(hashes_file) == mtime:
-                write_pickle(
-                    hashes, hashes_file, partition_dir, PICKLE_PROTOCOL)
-                return hashed, hashes
-        return get_hashes(partition_dir, recalculate, do_listdir,
-                          reclaim_age)
-    else:
-        return hashed, hashes
 
 
 class AuditLocation(object):
@@ -620,7 +495,7 @@ class DiskFileManager(object):
                         partition, account, container, obj,
                         policy_idx=policy_idx, **kwargs)
 
-    def get_hashes(self, device, partition, suffix, policy_idx):
+    def get_hashes(self, device, partition, policy_idx):
         dev_path = self.get_dev_path(device)
         if not dev_path:
             raise DiskFileDeviceUnavailable()
@@ -628,9 +503,8 @@ class DiskFileManager(object):
                                       partition)
         if not os.path.exists(partition_path):
             mkdirs(partition_path)
-        suffixes = suffix.split('-') if suffix else []
-        _junk, hashes = self.threadpools[device].force_run_in_thread(
-            get_hashes, partition_path, recalculate=suffixes)
+        hashes = self.threadpools[device].force_run_in_thread(
+            partitionindex.get_hashes, partition_path, self.reclaim_age)
         return hashes
 
     def _listdir(self, path):
@@ -672,24 +546,9 @@ class DiskFileManager(object):
         be yielded.
         """
         dev_path = self.get_dev_path(device)
-        if not dev_path:
-            raise DiskFileDeviceUnavailable()
-        if suffixes is None:
-            suffixes = self.yield_suffixes(device, partition, policy_idx)
-        else:
-            partition_path = os.path.join(dev_path, get_data_dir(policy_idx),
-                                          partition)
-            suffixes = (
-                (os.path.join(partition_path, suffix), suffix)
-                for suffix in suffixes)
-        for suffix_path, suffix in suffixes:
-            for object_hash in self._listdir(suffix_path):
-                object_path = os.path.join(suffix_path, object_hash)
-                for name in hash_cleanup_listdir(
-                        object_path, self.reclaim_age):
-                    ts, ext = name.rsplit('.', 1)
-                    yield (object_path, object_hash, ts)
-                    break
+        partition_path = os.path.join(dev_path, get_data_dir(policy_idx),
+                                      partition)
+        return partitionindex.yield_hashes(partition_path, suffixes)
 
 
 class DiskFileWriter(object):
@@ -773,10 +632,10 @@ class DiskFileWriter(object):
         # drop_cache() after fsync() to avoid redundant work (pages all
         # clean).
         drop_buffer_cache(self._fd, 0, self._upload_size)
-        invalidate_hash(dirname(self._datadir))
         # After the rename completes, this object will be available for other
         # requests to reference.
         renamer(self._tmppath, target_path)
+        partitionindex.add_file(target_path)
         try:
             hash_cleanup_listdir(self._datadir)
         except OSError:

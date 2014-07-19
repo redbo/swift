@@ -24,19 +24,16 @@ from swift import gettext_ as _
 
 import eventlet
 from eventlet import GreenPool, tpool, Timeout, sleep, hubs
-from eventlet.green import subprocess
 from eventlet.support.greenlets import GreenletExit
 
 from swift.common.utils import whataremyips, unlink_older_than, \
-    compute_eta, get_logger, dump_recon_cache, ismount, \
-    rsync_ip, mkdirs, config_true_value, list_from_csv, get_hub, \
-    tpool_reraise, config_auto_int_value
+    compute_eta, get_logger, dump_recon_cache, ismount, mkdirs, \
+    config_true_value, list_from_csv, get_hub, config_auto_int_value
 from swift.common.bufferedhttp import http_connect
 from swift.common.daemon import Daemon
 from swift.common.http import HTTP_OK, HTTP_INSUFFICIENT_STORAGE
 from swift.obj import ssync_sender
-from swift.obj.diskfile import (DiskFileManager, get_hashes, get_data_dir,
-                                get_tmp_dir)
+from swift.obj.diskfile import DiskFileManager, get_data_dir, get_tmp_dir
 from swift.common.storage_policy import POLICIES
 
 
@@ -71,9 +68,6 @@ class ObjectReplicator(Daemon):
         self.reclaim_age = int(conf.get('reclaim_age', 86400 * 7))
         self.partition_times = []
         self.run_pause = int(conf.get('run_pause', 30))
-        self.rsync_timeout = int(conf.get('rsync_timeout', 900))
-        self.rsync_io_timeout = conf.get('rsync_io_timeout', '30')
-        self.rsync_bwlimit = conf.get('rsync_bwlimit', '0')
         self.http_timeout = int(conf.get('http_timeout', 60))
         self.lockup_timeout = int(conf.get('lockup_timeout', 1800))
         self.recon_cache_path = conf.get('recon_cache_path',
@@ -81,32 +75,16 @@ class ObjectReplicator(Daemon):
         self.rcache = os.path.join(self.recon_cache_path, "object.recon")
         self.conn_timeout = float(conf.get('conn_timeout', 0.5))
         self.node_timeout = float(conf.get('node_timeout', 10))
-        self.sync_method = getattr(self, conf.get('sync_method') or 'rsync')
         self.network_chunk_size = int(conf.get('network_chunk_size', 65536))
         self.disk_chunk_size = int(conf.get('disk_chunk_size', 65536))
         self.headers = {
             'Content-Length': '0',
             'user-agent': 'object-replicator %s' % os.getpid()}
-        self.rsync_error_log_line_length = \
-            int(conf.get('rsync_error_log_line_length', 0))
         self.handoffs_first = config_true_value(conf.get('handoffs_first',
                                                          False))
         self.handoff_delete = config_auto_int_value(
             conf.get('handoff_delete', 'auto'), 0)
         self._diskfile_mgr = DiskFileManager(conf, self.logger)
-
-    def sync(self, node, job, suffixes):  # Just exists for doc anchor point
-        """
-        Synchronize local suffix directories from a partition with a remote
-        node.
-
-        :param node: the "dev" entry for the remote node to sync with
-        :param job: information about the partition being synced
-        :param suffixes: a list of suffixes which need to be pushed
-
-        :returns: boolean indicating success or failure
-        """
-        return self.sync_method(node, job, suffixes)
 
     def get_object_ring(self, policy_idx):
         """
@@ -116,88 +94,6 @@ class ObjectReplicator(Daemon):
         :returns: appropriate ring object
         """
         return POLICIES.get_object_ring(policy_idx, self.swift_dir)
-
-    def _rsync(self, args):
-        """
-        Execute the rsync binary to replicate a partition.
-
-        :returns: return code of rsync process. 0 is successful
-        """
-        start_time = time.time()
-        ret_val = None
-        try:
-            with Timeout(self.rsync_timeout):
-                proc = subprocess.Popen(args,
-                                        stdout=subprocess.PIPE,
-                                        stderr=subprocess.STDOUT)
-                results = proc.stdout.read()
-                ret_val = proc.wait()
-        except Timeout:
-            self.logger.error(_("Killing long-running rsync: %s"), str(args))
-            proc.kill()
-            return 1  # failure response code
-        total_time = time.time() - start_time
-        for result in results.split('\n'):
-            if result == '':
-                continue
-            if result.startswith('cd+'):
-                continue
-            if not ret_val:
-                self.logger.info(result)
-            else:
-                self.logger.error(result)
-        if ret_val:
-            error_line = _('Bad rsync return code: %(ret)d <- %(args)s') % \
-                {'args': str(args), 'ret': ret_val}
-            if self.rsync_error_log_line_length:
-                error_line = error_line[:self.rsync_error_log_line_length]
-            self.logger.error(error_line)
-        elif results:
-            self.logger.info(
-                _("Successful rsync of %(src)s at %(dst)s (%(time).03f)"),
-                {'src': args[-2], 'dst': args[-1], 'time': total_time})
-        else:
-            self.logger.debug(
-                _("Successful rsync of %(src)s at %(dst)s (%(time).03f)"),
-                {'src': args[-2], 'dst': args[-1], 'time': total_time})
-        return ret_val
-
-    def rsync(self, node, job, suffixes):
-        """
-        Uses rsync to implement the sync method. This was the first
-        sync method in Swift.
-        """
-        if not os.path.exists(job['path']):
-            return False
-        args = [
-            'rsync',
-            '--recursive',
-            '--whole-file',
-            '--human-readable',
-            '--xattrs',
-            '--itemize-changes',
-            '--ignore-existing',
-            '--timeout=%s' % self.rsync_io_timeout,
-            '--contimeout=%s' % self.rsync_io_timeout,
-            '--bwlimit=%s' % self.rsync_bwlimit,
-        ]
-        node_ip = rsync_ip(node['replication_ip'])
-        if self.vm_test_mode:
-            rsync_module = '%s::object%s' % (node_ip, node['replication_port'])
-        else:
-            rsync_module = '%s::object' % node_ip
-        had_any = False
-        for suffix in suffixes:
-            spath = join(job['path'], suffix)
-            if os.path.exists(spath):
-                args.append(spath)
-                had_any = True
-        if not had_any:
-            return False
-        data_dir = get_data_dir(job['policy_idx'])
-        args.append(join(rsync_module, node['device'],
-                    data_dir, job['partition']))
-        return self._rsync(args) == 0
 
     def ssync(self, node, job, suffixes):
         return ssync_sender.Sender(self, node, job, suffixes)()
@@ -235,15 +131,7 @@ class ObjectReplicator(Daemon):
             suffixes = tpool.execute(tpool_get_suffixes, job['path'])
             if suffixes:
                 for node in job['nodes']:
-                    success = self.sync(node, job, suffixes)
-                    if success:
-                        with Timeout(self.http_timeout):
-                            conn = http_connect(
-                                node['replication_ip'],
-                                node['replication_port'],
-                                node['device'], job['partition'], 'REPLICATE',
-                                '/' + '-'.join(suffixes), headers=self.headers)
-                            conn.getresponse().read()
+                    success = self.ssync(node, job, suffixes)
                     responses.append(success)
             if self.handoff_delete:
                 # delete handoff if we have had handoff_delete successes
@@ -273,12 +161,8 @@ class ObjectReplicator(Daemon):
         self.headers['X-Backend-Storage-Policy-Index'] = job['policy_idx']
         begin = time.time()
         try:
-            hashed, local_hash = tpool_reraise(
-                get_hashes, job['path'],
-                do_listdir=(self.replication_count % 10) == 0,
-                reclaim_age=self.reclaim_age)
-            self.suffix_hash += hashed
-            self.logger.update_stats('suffix.hashes', hashed)
+            local_hash = self._diskfile_mgr.get_hashes(
+                job['device'], job['partition'], job['policy_idx'])
             attempts_left = len(job['nodes'])
             nodes = itertools.chain(
                 job['nodes'],
@@ -311,23 +195,7 @@ class ObjectReplicator(Daemon):
                                 remote_hash.get(suffix, -1)]
                     if not suffixes:
                         continue
-                    hashed, recalc_hash = tpool_reraise(
-                        get_hashes,
-                        job['path'], recalculate=suffixes,
-                        reclaim_age=self.reclaim_age)
-                    self.logger.update_stats('suffix.hashes', hashed)
-                    local_hash = recalc_hash
-                    suffixes = [suffix for suffix in local_hash if
-                                local_hash[suffix] !=
-                                remote_hash.get(suffix, -1)]
-                    self.sync(node, job, suffixes)
-                    with Timeout(self.http_timeout):
-                        conn = http_connect(
-                            node['replication_ip'], node['replication_port'],
-                            node['device'], job['partition'], 'REPLICATE',
-                            '/' + '-'.join(suffixes),
-                            headers=self.headers)
-                        conn.getresponse().read()
+                    self.ssync(node, job, suffixes)
                     self.suffix_sync += len(suffixes)
                     self.logger.update_stats('suffix.syncs', len(suffixes))
                 except (Exception, Timeout):
@@ -360,9 +228,8 @@ class ObjectReplicator(Daemon):
             if self.suffix_count:
                 self.logger.info(
                     _("%(checked)d suffixes checked - "
-                      "%(hashed).2f%% hashed, %(synced).2f%% synced"),
+                      "%(synced).2f%% synced"),
                     {'checked': self.suffix_count,
-                     'hashed': (self.suffix_hash * 100.0) / self.suffix_count,
                      'synced': (self.suffix_sync * 100.0) / self.suffix_count})
                 self.partition_times.sort()
                 self.logger.info(
@@ -459,7 +326,7 @@ class ObjectReplicator(Daemon):
     def collect_jobs(self):
         """
         Returns a sorted list of jobs (dictionaries) that specify the
-        partitions, nodes, etc to be rsynced.
+        partitions, nodes, etc to be synced.
         """
         jobs = []
         ips = whataremyips()
@@ -478,7 +345,6 @@ class ObjectReplicator(Daemon):
         self.start = time.time()
         self.suffix_count = 0
         self.suffix_sync = 0
-        self.suffix_hash = 0
         self.replication_count = 0
         self.last_replication_count = -1
         self.partition_times = []

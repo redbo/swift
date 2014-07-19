@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import urllib
+
 from swift.common import bufferedhttp
 from swift.common import exceptions
 from swift.common import http
@@ -167,13 +168,11 @@ class Sender(object):
                 self.daemon.node_timeout, 'missing_check start'):
             msg = ':MISSING_CHECK: START\r\n'
             self.connection.send('%x\r\n%s\r\n' % (len(msg), msg))
-        for path, object_hash, timestamp in \
-                self.daemon._diskfile_mgr.yield_hashes(
-                    self.job['device'], self.job['partition'],
-                    self.policy_idx, self.suffixes):
+        for object_hash, timestamp in self.daemon._diskfile_mgr.yield_hashes(
+                self.job['device'], self.job['partition'], self.policy_idx,
+                self.suffixes):
             with exceptions.MessageTimeout(
-                    self.daemon.node_timeout,
-                    'missing_check send line'):
+                    self.daemon.node_timeout, 'missing_check send line'):
                 msg = '%s %s\r\n' % (
                     urllib.quote(object_hash),
                     urllib.quote(timestamp))

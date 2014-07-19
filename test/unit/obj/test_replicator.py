@@ -30,7 +30,7 @@ from test.unit import FakeLogger, patch_policies
 from swift.common import utils
 from swift.common.utils import hash_path, mkdirs, normalize_timestamp
 from swift.common import ring
-from swift.obj import diskfile, replicator as object_replicator
+from swift.obj import diskfile, replicator as object_replicator, partitionindex
 from swift.common.storage_policy import StoragePolicy, POLICIES
 
 
@@ -603,7 +603,7 @@ class TestObjectReplicator(unittest.TestCase):
                     mount_check='false', timeout='300', stats_interval='1')
         replicator = object_replicator.ObjectReplicator(conf)
         was_connector = object_replicator.http_connect
-        was_get_hashes = object_replicator.get_hashes
+        was_get_hashes = partitionindex.get_hashes
         was_execute = tpool.execute
         self.get_hash_count = 0
         try:
@@ -621,7 +621,7 @@ class TestObjectReplicator(unittest.TestCase):
 
             self.i_failed = False
             object_replicator.http_connect = mock_http_connect(200)
-            object_replicator.get_hashes = fake_get_hashes
+            partitionindex.get_hashes = fake_get_hashes
             replicator.logger.exception = \
                 lambda *args, **kwargs: fake_exc(self, *args, **kwargs)
             # Write some files into '1' and run replicate- they should be moved
@@ -656,7 +656,7 @@ class TestObjectReplicator(unittest.TestCase):
             self.assertFalse(self.i_failed)
         finally:
             object_replicator.http_connect = was_connector
-            object_replicator.get_hashes = was_get_hashes
+            partiionindex.get_hashes = was_get_hashes
             tpool.execute = was_execute
 
     def test_run(self):
@@ -670,12 +670,6 @@ class TestObjectReplicator(unittest.TestCase):
             with mock.patch('swift.obj.replicator.http_connect',
                             mock_http_connect(200)):
                 self.replicator.replicate()
-
-    def test_sync_just_calls_sync_method(self):
-        self.replicator.sync_method = mock.MagicMock()
-        self.replicator.sync('node', 'job', 'suffixes')
-        self.replicator.sync_method.assert_called_once_with(
-            'node', 'job', 'suffixes')
 
     @mock.patch('swift.obj.replicator.tpool_reraise', autospec=True)
     @mock.patch('swift.obj.replicator.http_connect', autospec=True)
