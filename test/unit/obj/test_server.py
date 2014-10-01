@@ -3862,16 +3862,11 @@ class TestObjectController(unittest.TestCase):
 
     def test_REPLICATE_works(self):
 
-        def fake_get_hashes(*args, **kwargs):
-            return 0, {1: 2}
-
         def my_tpool_execute(func, *args, **kwargs):
             return func(*args, **kwargs)
 
-        was_get_hashes = diskfile.get_hashes
         was_tpool_exe = tpool.execute
         try:
-            diskfile.get_hashes = fake_get_hashes
             tpool.execute = my_tpool_execute
             req = Request.blank('/sda1/p/suff',
                                 environ={'REQUEST_METHOD': 'REPLICATE'},
@@ -3882,20 +3877,14 @@ class TestObjectController(unittest.TestCase):
             self.assertEquals(p_data, {1: 2})
         finally:
             tpool.execute = was_tpool_exe
-            diskfile.get_hashes = was_get_hashes
 
     def test_REPLICATE_timeout(self):
-
-        def fake_get_hashes(*args, **kwargs):
-            raise Timeout()
 
         def my_tpool_execute(func, *args, **kwargs):
             return func(*args, **kwargs)
 
-        was_get_hashes = diskfile.get_hashes
         was_tpool_exe = tpool.execute
         try:
-            diskfile.get_hashes = fake_get_hashes
             tpool.execute = my_tpool_execute
             req = Request.blank('/sda1/p/suff',
                                 environ={'REQUEST_METHOD': 'REPLICATE'},
@@ -3903,7 +3892,6 @@ class TestObjectController(unittest.TestCase):
             self.assertRaises(Timeout, self.object_controller.REPLICATE, req)
         finally:
             tpool.execute = was_tpool_exe
-            diskfile.get_hashes = was_get_hashes
 
     def test_REPLICATE_insufficient_storage(self):
         conf = {'devices': self.testdir, 'mount_check': 'true'}

@@ -663,10 +663,10 @@ class ObjectController(object):
         Handle REPLICATE requests for the Swift Object Server.  This is used
         by the object replicator to get hashes for directories.
         """
-        device, partition, suffix, policy_idx = \
+        device, partition, paths, policy_idx = \
             get_name_and_placement(request, 2, 3, True)
         try:
-            hashes = self._diskfile_mgr.get_hashes(device, partition, suffix,
+            hashes = self._diskfile_mgr.get_hashes(device, partition,
                                                    policy_idx)
         except DiskFileDeviceUnavailable:
             resp = HTTPInsufficientStorage(drive=device, request=request)

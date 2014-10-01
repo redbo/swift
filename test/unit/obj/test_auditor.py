@@ -24,8 +24,8 @@ from hashlib import md5
 from tempfile import mkdtemp
 from test.unit import FakeLogger, patch_policies
 from swift.obj import auditor
-from swift.obj.diskfile import DiskFile, write_metadata, invalidate_hash, \
-    get_data_dir, DiskFileManager, AuditLocation
+from swift.obj.diskfile import DiskFile, write_metadata, get_data_dir, \
+    DiskFileManager, AuditLocation
 from swift.common.utils import hash_path, mkdirs, normalize_timestamp, \
     storage_directory
 from swift.common.storage_policy import StoragePolicy
@@ -181,7 +181,6 @@ class TestAuditor(unittest.TestCase):
         fp = open(path, 'w')
         fp.write('0' * 1024)
         fp.close()
-        invalidate_hash(os.path.dirname(self.disk_file._datadir))
         auditor_worker = auditor.AuditorWorker(self.conf, self.logger,
                                                self.rcache, self.devices)
         pre_quarantines = auditor_worker.quarantines

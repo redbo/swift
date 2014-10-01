@@ -585,6 +585,28 @@ def drop_buffer_cache(fd, offset, length):
                                     'length': length, 'ret': ret})
 
 
+def preload_buffer_cache(fd, offset=0, length=None):
+    """
+    Drop 'buffer' cache for the given range of the given file.
+
+    :param fd: file descriptor
+    :param offset: start offset
+    :param length: length
+    """
+    global _posix_fadvise
+    if _posix_fadvise is None:
+        _posix_fadvise = load_libc_function('posix_fadvise64')
+    # 3 means "POSIX_FADV_DONTNEED"
+    if length is None:
+        length = os.fstat(fd).st_size - offset
+    ret = _posix_fadvise(fd, ctypes.c_uint64(offset),
+                         ctypes.c_uint64(length), 3)
+    if ret != 0:
+        logging.warn("posix_fadvise64(%(fd)s, %(offset)s, %(length)s, 4) "
+                     "-> %(ret)s", {'fd': fd, 'offset': offset,
+                                    'length': length, 'ret': ret})
+
+
 NORMAL_FORMAT = "%016.05f"
 INTERNAL_FORMAT = NORMAL_FORMAT + '_%016x'
 # Setting this to True will cause the internal format to always display
