@@ -165,8 +165,19 @@ func WriteFileAtomic(filename string, data []byte, perm os.FileMode) error {
 	return nil
 }
 
-func LockPath(directory string, timeout int) (*os.File, error) {
+func LockFile(f *os.File, timeout int) error {
 	sleepTime := 5
+	for stop := time.Now().Add(time.Duration(timeout) * time.Second); time.Now().Before(stop); {
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+			return nil
+		}
+		time.Sleep(time.Millisecond * time.Duration(sleepTime))
+		sleepTime += 5
+	}
+	return errors.New("Timed out")
+}
+
+func LockPath(directory string, timeout int) (*os.File, error) {
 	lockfile := filepath.Join(directory, ".lock")
 	file, err := os.OpenFile(lockfile, os.O_RDWR|os.O_CREATE, 0660)
 	if err != nil {
@@ -177,16 +188,11 @@ func LockPath(directory string, timeout int) (*os.File, error) {
 			return nil, errors.New(fmt.Sprintf("Unable to open file ccc. ( %s )", err.Error()))
 		}
 	}
-	for stop := time.Now().Add(time.Duration(timeout) * time.Second); time.Now().Before(stop); {
-		err = syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-		if err == nil {
-			return file, nil
-		}
-		time.Sleep(time.Millisecond * time.Duration(sleepTime))
-		sleepTime += 5
+	if err = LockFile(file, timeout); err != nil {
+		file.Close()
+		return nil, err
 	}
-	file.Close()
-	return nil, errors.New("Timed out")
+	return file, nil
 }
 
 func LockParent(file string, timeout int) (*os.File, error) {

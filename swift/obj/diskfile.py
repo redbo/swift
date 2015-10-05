@@ -598,6 +598,7 @@ class BaseDiskFileManager(object):
             hsh_path, reclaim_age=reclaim_age)['files']
 
     def _hash_suffix_dir(self, path, mapper, reclaim_age):
+        hashed = ''
         hashes = defaultdict(hashlib.md5)
         try:
             path_contents = sorted(os.listdir(path))
@@ -629,6 +630,7 @@ class BaseDiskFileManager(object):
             for filename in files:
                 key, value = mapper(filename)
                 hashes[key].update(value)
+                hashed += value
         try:
             os.rmdir(path)
         except OSError as e:
@@ -638,6 +640,7 @@ class BaseDiskFileManager(object):
             # if we remove it, pretend like it wasn't there to begin with so
             # that the suffix key gets removed
             raise PathNotDir()
+        print hashed
         return hashes
 
     def _hash_suffix(self, path, reclaim_age):
@@ -691,6 +694,7 @@ class BaseDiskFileManager(object):
             modified = True
         hashes.update((suffix, None) for suffix in recalculate)
         for suffix, hash_ in hashes.items():
+            print "HERE MOFO"
             if not hash_:
                 suffix_dir = join(partition_path, suffix)
                 try:

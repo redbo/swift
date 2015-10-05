@@ -501,10 +501,9 @@ func (server *ObjectServer) ObjRepConnHandler(writer http.ResponseWriter, reques
 	defer server.replicationMan.Done(brr.Device)
 	var hashes map[string]string
 	if brr.NeedHashes {
-		var herr *hummingbird.BackendError
-		hashes, herr = GetHashes(server.driveRoot, brr.Device, brr.Partition, nil, hummingbird.GetLogger(request))
-		if herr != nil {
-			hummingbird.GetLogger(request).LogError("[ObjRepConnHandler] Error getting hashes: %v", herr)
+		hashes, err = GetHashes(server.driveRoot, brr.Device, brr.Partition, nil, hummingbird.GetLogger(request))
+		if err != nil {
+			hummingbird.GetLogger(request).LogError("[ObjRepConnHandler] Error getting hashes: %v", err)
 			writer.WriteHeader(http.StatusInternalServerError)
 			return
 		}

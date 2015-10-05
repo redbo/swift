@@ -22,13 +22,11 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/openstack/swift/go/hummingbird"
 )
@@ -141,41 +139,10 @@ func QuarantineHash(hashDir string) error {
 	return nil
 }
 
-func InvalidateHash(hashDir string) error {
-	suffDir := filepath.Dir(hashDir)
-	partitionDir := filepath.Dir(suffDir)
-	partitionLock, err := hummingbird.LockPath(partitionDir, 10)
-	if err != nil {
-		return err
-	}
-	defer partitionLock.Close()
-	pklFile := partitionDir + "/hashes.pkl"
-	data, err := ioutil.ReadFile(pklFile)
-	if err != nil {
-		return err
-	}
-	v, err := hummingbird.PickleLoads(data)
-	if err != nil {
-		return err
-	}
-	suffixDirSplit := strings.Split(suffDir, "/")
-	suffix := suffixDirSplit[len(suffixDirSplit)-1]
-	hashes, ok := v.(map[interface{}]interface{})
-	if !ok {
-		return fmt.Errorf("hashes.pkl file does not contain map: %v", v)
-	}
-	if current, ok := hashes[suffix]; ok && (current == nil || current == "") {
-		return nil
-	}
-	hashes[suffix] = nil
-	return hummingbird.WriteFileAtomic(pklFile, hummingbird.PickleDumps(hashes), 0600)
-}
-
 func HashCleanupListDir(hashDir string, logger hummingbird.LoggingContext) ([]string, *hummingbird.BackendError) {
 	fileList, err := hummingbird.ReadDirNames(hashDir)
 	returnList := []string{}
 	if err != nil {
-
 		if os.IsNotExist(err) {
 			return returnList, nil
 		}
@@ -188,17 +155,6 @@ func HashCleanupListDir(hashDir string, logger hummingbird.LoggingContext) ([]st
 	deleteRestMeta := false
 	if len(fileList) == 1 {
 		filename := fileList[0]
-		if strings.HasSuffix(filename, ".ts") {
-			withoutSuffix := strings.Split(filename, ".")[0]
-			if strings.Contains(withoutSuffix, "_") {
-				withoutSuffix = strings.Split(withoutSuffix, "_")[0]
-			}
-			timestamp, _ := strconv.ParseFloat(withoutSuffix, 64)
-			if time.Now().Unix()-int64(timestamp) > int64(hummingbird.ONE_WEEK) {
-				os.RemoveAll(hashDir + "/" + filename)
-				return returnList, nil
-			}
-		}
 		returnList = append(returnList, filename)
 	} else {
 		for index := len(fileList) - 1; index >= 0; index-- {
@@ -214,7 +170,6 @@ func HashCleanupListDir(hashDir string, logger hummingbird.LoggingContext) ([]st
 					deleteRestMeta = true
 				}
 				if strings.HasSuffix(filename, ".ts") || strings.HasSuffix(filename, ".data") {
-					// TODO: check .ts time for expiration
 					deleteRest = true
 				}
 				returnList = append(returnList, filename)
@@ -222,117 +177,6 @@ func HashCleanupListDir(hashDir string, logger hummingbird.LoggingContext) ([]st
 		}
 	}
 	return returnList, nil
-}
-
-func RecalculateSuffixHash(suffixDir string, logger hummingbird.LoggingContext) (string, *hummingbird.BackendError) {
-	// the is hash_suffix in swift
-	h := md5.New()
-
-	hashList, err := hummingbird.ReadDirNames(suffixDir)
-	if err != nil {
-		if hummingbird.IsNotDir(err) {
-			return "", &hummingbird.BackendError{Err: err, Code: hummingbird.PathNotDirErrorCode}
-		}
-		return "", &hummingbird.BackendError{Err: err, Code: hummingbird.OsErrorCode}
-	}
-	for _, fullHash := range hashList {
-		hashPath := suffixDir + "/" + fullHash
-		fileList, err := HashCleanupListDir(hashPath, logger)
-		if err != nil {
-			if err.Code == hummingbird.PathNotDirErrorCode {
-				if QuarantineHash(hashPath) == nil {
-					InvalidateHash(hashPath)
-				}
-				continue
-			}
-			return "", err
-		}
-		if len(fileList) > 0 {
-			for _, fileName := range fileList {
-				io.WriteString(h, fileName)
-			}
-		} else {
-			os.Remove(hashPath) // leaves the suffix (swift removes it but who cares)
-		}
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
-func GetHashes(driveRoot string, device string, partition string, recalculate []string, logger hummingbird.LoggingContext) (map[string]string, *hummingbird.BackendError) {
-	partitionDir := filepath.Join(driveRoot, device, "objects", partition)
-	pklFile := filepath.Join(partitionDir, "hashes.pkl")
-
-	modified := false
-	mtime := int64(-1)
-	hashes := make(map[string]string, 4096)
-	lsForSuffixes := true
-	if data, err := ioutil.ReadFile(pklFile); err == nil {
-		if v, err := hummingbird.PickleLoads(data); err == nil {
-			if pickledHashes, ok := v.(map[interface{}]interface{}); ok {
-				if fileInfo, err := os.Stat(pklFile); err == nil {
-					mtime = fileInfo.ModTime().Unix()
-					lsForSuffixes = false
-					for suff, hash := range pickledHashes {
-						if hashes[suff.(string)], ok = hash.(string); !ok {
-							hashes[suff.(string)] = ""
-						}
-					}
-				}
-			}
-		}
-	}
-	// check occasionally to see if there are any suffixes not in the hashes.pkl
-	if !lsForSuffixes && len(hashes) < 4096 {
-		lsForSuffixes = rand.Int31n(10) == 0
-	}
-	if lsForSuffixes {
-		// couldn't load hashes pickle, start building new one
-		suffs, _ := hummingbird.ReadDirNames(partitionDir)
-
-		for _, suffName := range suffs {
-			if len(suffName) == 3 && hashes[suffName] == "" {
-				hashes[suffName] = ""
-			}
-		}
-	}
-	for _, suffix := range recalculate {
-		if len(suffix) == 3 {
-			hashes[suffix] = ""
-		}
-	}
-	for suffix, hash := range hashes {
-		if hash == "" {
-			modified = true
-			suffixDir := driveRoot + "/" + device + "/objects/" + partition + "/" + suffix
-			recalc_hash, err := RecalculateSuffixHash(suffixDir, logger)
-			if err == nil {
-				hashes[suffix] = recalc_hash
-			} else {
-				switch {
-				case err.Code == hummingbird.PathNotDirErrorCode:
-					delete(hashes, suffix)
-				case err.Code == hummingbird.OsErrorCode:
-					logger.LogError("Error hashing suffix: %s/%s (%s)", partitionDir, suffix, "asdf")
-				}
-			}
-		}
-	}
-	if modified {
-		partitionLock, err := hummingbird.LockPath(partitionDir, 10)
-		defer partitionLock.Close()
-		if err != nil {
-			return nil, &hummingbird.BackendError{Err: err, Code: hummingbird.LockPathError}
-		} else {
-			fileInfo, err := os.Stat(pklFile)
-			if lsForSuffixes || os.IsNotExist(err) || mtime == fileInfo.ModTime().Unix() {
-				hummingbird.WriteFileAtomic(pklFile, hummingbird.PickleDumps(hashes), 0600)
-				return hashes, nil
-			}
-			logger.LogError("Made recursive call to GetHashes: %s", partitionDir)
-			return GetHashes(driveRoot, device, partition, recalculate, logger)
-		}
-	}
-	return hashes, nil
 }
 
 func ObjHashDir(vars map[string]string, driveRoot string, hashPathPrefix string, hashPathSuffix string) string {
