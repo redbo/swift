@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/openstack/swift/go/bench"
+	"github.com/openstack/swift/go/containerserver"
 	"github.com/openstack/swift/go/hummingbird"
 	"github.com/openstack/swift/go/objectserver"
 	"github.com/openstack/swift/go/proxyserver"
@@ -200,10 +201,10 @@ func ProcessControlCommand(serverCommand func(name string, args ...string)) {
 	}
 
 	switch flag.Arg(1) {
-	case "proxy", "object", "object-replicator", "object-auditor":
+	case "proxy", "object", "object-replicator", "object-auditor", "container":
 		serverCommand(flag.Arg(1), flag.Args()[2:]...)
 	case "all":
-		for _, server := range []string{"proxy", "object", "object-replicator", "object-auditor"} {
+		for _, server := range []string{"proxy", "object", "object-replicator", "object-auditor", "container"} {
 			serverCommand(server)
 		}
 	default:
@@ -257,6 +258,25 @@ func main() {
 		fmt.Fprintf(os.Stderr, "hummingbird object-auditor [ARGS]\n")
 		fmt.Fprintf(os.Stderr, "  Run object auditor\n")
 		objectAuditorFlags.PrintDefaults()
+	}
+
+	containerFlags := flag.NewFlagSet("container server", flag.ExitOnError)
+	containerFlags.Bool("d", false, "Close stdio once the server is running")
+	containerFlags.String("c", findConfig("container"), "Config file/directory to use")
+	containerFlags.Usage = func() {
+		fmt.Fprintf(os.Stderr, "hummingbird container [ARGS]\n")
+		fmt.Fprintf(os.Stderr, "  Run container server\n")
+		containerFlags.PrintDefaults()
+	}
+
+	containerReplicatorFlags := flag.NewFlagSet("container replicator", flag.ExitOnError)
+	containerReplicatorFlags.Bool("d", false, "Close stdio once the server is running")
+	containerReplicatorFlags.String("c", findConfig("container"), "Config file/directory to use")
+	containerReplicatorFlags.Bool("once", false, "Run one pass of the replicator")
+	containerReplicatorFlags.Usage = func() {
+		fmt.Fprintf(os.Stderr, "hummingbird container-replicator [ARGS]\n")
+		fmt.Fprintf(os.Stderr, "  Run container replicator\n")
+		containerReplicatorFlags.PrintDefaults()
 	}
 
 	/* main flag parser, which doesn't do much */
@@ -321,6 +341,12 @@ func main() {
 	case "proxy":
 		proxyFlags.Parse(flag.Args()[1:])
 		hummingbird.RunServers(proxyserver.GetServer, proxyFlags)
+	case "container":
+		containerFlags.Parse(flag.Args()[1:])
+		hummingbird.RunServers(containerserver.GetServer, containerFlags)
+	case "container-replicator":
+		containerFlags.Parse(flag.Args()[1:])
+		hummingbird.RunDaemon(containerserver.GetReplicator, containerReplicatorFlags)
 	case "object":
 		objectFlags.Parse(flag.Args()[1:])
 		hummingbird.RunServers(objectserver.GetServer, objectFlags)
@@ -332,8 +358,10 @@ func main() {
 		hummingbird.RunDaemon(objectserver.NewAuditor, objectAuditorFlags)
 	case "bench":
 		bench.RunBench(flag.Args()[1:])
-	case "dbench":
-		bench.RunDBench(flag.Args()[1:])
+	case "cbench":
+		bench.RunCBench(flag.Args()[1:])
+	case "cgbench":
+		bench.RunCGBench(flag.Args()[1:])
 	case "thrash":
 		bench.RunThrash(flag.Args()[1:])
 	case "moveparts":
