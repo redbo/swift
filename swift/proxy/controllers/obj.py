@@ -890,6 +890,11 @@ class ReplicatedObjectController(BaseObjectController):
         return resp
 
 
+@ObjectControllerRouter.register('slab')
+class SlabObjectController(ReplicatedObjectController):
+    pass
+
+
 class ECAppIter(object):
     """
     WSGI iterable that decodes EC fragment archives (or portions thereof)

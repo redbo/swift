@@ -391,6 +391,11 @@ class StoragePolicy(BaseStoragePolicy):
         return quorum_size(self.object_ring.replica_count)
 
 
+@BaseStoragePolicy.register('slab')
+class SlabPolicy(StoragePolicy):
+    pass
+
+
 @BaseStoragePolicy.register(EC_POLICY)
 class ECStoragePolicy(BaseStoragePolicy):
     """
