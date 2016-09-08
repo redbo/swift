@@ -221,7 +221,7 @@ func (l *lruEngine) getbypath(containerFile string) (c Container, err error) {
 		l.used.MoveToBack(e.elem)
 		return e.c, nil
 	}
-	if c, err = sqliteOpenContainer(containerFile); err != nil {
+	if c, err = levelOpenContainer(containerFile); err != nil {
 		return nil, err
 	}
 	l.add(c)
@@ -243,12 +243,12 @@ func (l *lruEngine) Create(vars map[string]string, putTimestamp string, metadata
 		if policyIndex < 0 {
 			policyIndex = defaultPolicyIndex
 		}
-		err = sqliteCreateContainer(containerFile, vars["account"], vars["container"], putTimestamp, metadata, policyIndex)
+		err = levelCreateContainer(containerFile, vars["account"], vars["container"], putTimestamp, metadata, policyIndex)
 		if err == nil {
 			c, err = l.Get(vars)
 		}
 	} else {
-		created, err = sqliteCreateExistingContainer(c, putTimestamp, metadata, policyIndex, defaultPolicyIndex)
+		created, err = levelCreateExistingContainer(c, putTimestamp, metadata, policyIndex, defaultPolicyIndex)
 	}
 	return created, c, err
 }
